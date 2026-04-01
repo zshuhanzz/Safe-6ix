@@ -1,6 +1,7 @@
 # Safe 6ix
 
-![Drake Toronto](frontend/public/drake%20toronto.jpeg)
+<img src="frontend/public/drake toronto.jpeg" width="600"/>
+
 Inspired by my love for my city and my love for Drake. This project is a pedestrian safety routing app for Toronto (the 6ix). Enter an origin and destination, and the app recommends the safest walking route based on real Toronto Police Service crime data.
 
 ---
