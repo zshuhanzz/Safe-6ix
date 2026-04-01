@@ -74,7 +74,7 @@ export default function Safe6ixApp() {
               </div>
               <div>
                 <h1 className="text-4xl font-display font-bold text-gradient">Safe 6ix</h1>
-                <p className="text-base text-muted-foreground font-semibold">San Francisco, CA</p>
+                <p className="text-base text-muted-foreground font-semibold">Toronto, ON</p>
               </div>
             </div>
           </div>

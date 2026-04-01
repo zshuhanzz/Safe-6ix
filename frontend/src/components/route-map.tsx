@@ -152,8 +152,8 @@ function MapBoundsUpdater({ routes, routeCalculated }: { routes?: Route[]; route
 }
 
 export default function RouteMap({ routeCalculated, origin, destination, routes, selectedRouteId }: RouteMapProps) {
-  // Default center on San Francisco
-  const defaultCenter: [number, number] = [37.7749, -122.4194]
+  // Default center on Toronto
+  const defaultCenter: [number, number] = [43.6532, -79.3832]
   const defaultZoom = 13
 
   const [incidents, setIncidents] = useState<Incident[]>([])
