@@ -289,41 +289,66 @@ async def get_graphhopper_routes(origin_coords: Dict, dest_coords: Dict, num_rou
 
 def select_optimal_routes(scored_routes: List[Dict]) -> List[Dict]:
     """
-    Multi-objective route selection using bi-criteria shortest path (MOSP).
+    Multi-Objective Shortest Path (MOSP) with Weighted Sum Scalarization.
 
-    Each route is scored on two dimensions:
-        - normalized safety risk (lower = safer)
-        - normalized distance (lower = shorter)
+    -----------------------------------------------------------------
+    ALGORITHM OVERVIEW
+    -----------------------------------------------------------------
+    GraphHopper returns up to 5 alternative walking routes using its
+    internal alternative routing algorithm (a penalty-based variant of
+    Dijkstra's / A*). Each route is a candidate path with two properties:
+        - total_risk   : how dangerous the path is (lower = safer)
+        - distance_km  : how long the path is (lower = shorter)
 
-    Composite score = 0.7 * norm_risk + 0.3 * norm_dist
+    These two objectives conflict — the safest route is rarely the
+    shortest. This is a classic multi-objective optimization problem.
 
-    Returns 3 Pareto-optimal routes:
-        1. Optimal: lowest composite score (best safety/distance balance)
-        2. Safest: lowest risk (even if longer)
-        3. Shortest: shortest distance that differs from Route 1
+    STEP 1 — Normalize both objectives to [0, 1] so they are comparable:
+        norm_risk = total_risk / max_risk_across_all_routes
+        norm_dist = distance_km / max_dist_across_all_routes
+
+    STEP 2 — Weighted Sum Scalarization: collapse the two objectives into
+    one single composite score so routes can be ranked:
+        composite = 0.70 * norm_risk + 0.30 * norm_dist
+
+    Safety is weighted 70% because the app's purpose is pedestrian safety.
+    Distance is weighted 30% — we still care about walk time, just less.
+
+    STEP 3 — Select 3 Pareto-optimal routes, each representing a different
+    tradeoff point along the safety/distance spectrum:
+        Route 1 (Optimal) : lowest composite score — best overall balance
+        Route 2 (Safest)  : lowest raw risk score — safest even if longer
+        Route 3 (Shortest): shortest distance — fastest even if less safe
+
+    A route is Pareto-optimal when you cannot improve one objective
+    without making the other worse. No single route dominates all others
+    on both dimensions simultaneously.
+    -----------------------------------------------------------------
     """
     if not scored_routes:
         return []
 
+    # Step 1: Normalize risk and distance to [0, 1]
     max_risk = max(r["total_risk"] for r in scored_routes) or 1
     max_dist = max(r["distance_km"] for r in scored_routes) or 1
 
     for r in scored_routes:
         r["norm_risk"] = r["total_risk"] / max_risk
         r["norm_dist"] = r["distance_km"] / max_dist
+        # Step 2: Weighted sum — safety matters more than distance
         r["composite"] = SAFETY_WEIGHT * r["norm_risk"] + DISTANCE_WEIGHT * r["norm_dist"]
 
-    # Route 1: best composite score
+    # Step 3a — Route 1: best overall balance (lowest composite score)
     route1 = min(scored_routes, key=lambda r: r["composite"])
 
-    # Route 2: safest (lowest risk), deduplicated from route1
+    # Step 3b — Route 2: safest path (lowest risk), must differ from Route 1
     remaining = [r for r in scored_routes if r is not route1]
     if remaining:
         route2 = min(remaining, key=lambda r: r["total_risk"])
     else:
         route2 = route1
 
-    # Route 3: shortest distance not already selected
+    # Step 3c — Route 3: shortest path not already selected
     not_selected = [r for r in scored_routes if r is not route1 and r is not route2]
     if not_selected:
         route3 = min(not_selected, key=lambda r: r["distance_km"])
