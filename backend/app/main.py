@@ -58,7 +58,7 @@ async def lifespan(app: FastAPI):
     print("Starting Safe 6ix Backend (Toronto)...")
     data_fetcher.fetch_all_data()
 
-    interval_minutes = int(os.getenv("DATA_REFRESH_INTERVAL", 1440))
+    interval_minutes = int(os.getenv("DATA_REFRESH_INTERVAL", 60))
     scheduler.add_job(
         periodic_data_fetch,
         'interval',
