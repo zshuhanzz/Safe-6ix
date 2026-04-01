@@ -1,6 +1,7 @@
 # Safe 6ix
 
-A pedestrian safety routing app for Toronto. Enter an origin and destination, and the app recommends the safest walking route based on real Toronto Police Service crime data.
+![Drake Toronto](frontend/public/drake%20toronto.jpeg)
+Inspired by my love for my city and my love for Drake. This project is a pedestrian safety routing app for Toronto (the 6ix). Enter an origin and destination, and the app recommends the safest walking route based on real Toronto Police Service crime data.
 
 ---
 
@@ -24,31 +25,9 @@ A pedestrian safety routing app for Toronto. Enter an origin and destination, an
 
 **Requirements:** Python 3.9+, Node.js 16+, a free GraphHopper API key ([graphhopper.com](https://www.graphhopper.com/))
 
-Run `START.bat` — it handles everything on first launch (virtual environment, dependencies, .env setup) and starts both servers. The app opens automatically at `http://localhost:3000`.
+Run `START.bat` -> it handles everything on first launch (virtual environment, dependencies, .env setup) and starts both servers. The app opens automatically at `http://localhost:3000`.
 
----
 
-## Project Structure
-
-```
-Safe 6ix/
-├── backend/
-│   ├── app/
-│   │   ├── main.py          # FastAPI app, routing logic, graph theory selection
-│   │   ├── data_fetcher.py  # TPS API integration and caching
-│   │   └── risk_scorer.py   # Risk scoring formula
-│   ├── cache/               # Cached crime data (auto-generated, not committed)
-│   └── requirements.txt
-├── frontend/
-│   └── src/
-│       ├── components/      # React UI (map, route input, route cards)
-│       └── services/        # GraphHopper API client, geocoding
-├── .env                     # API keys (not committed)
-├── .env.example
-└── START.bat                # One-click launcher
-```
-
----
 
 ## Tech Stack
 
@@ -59,11 +38,3 @@ Map: OpenStreetMap
 
 ---
 
-## API Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/health` | Health check and incident count |
-| GET | `/api/data/stats` | Crime data statistics |
-| GET | `/api/incidents` | All incidents for map markers |
-| POST | `/api/routes` | Calculate routes for origin → destination |
