@@ -1,8 +1,26 @@
 # -*- coding: utf-8 -*-
 """
 Risk Scoring Algorithm Module
-Calculates path safety scores using distance-weighted incident data.
-No time decay - Toronto data is historical (monthly updates).
+Calculates path safety scores using distance-weighted incident data with gentle time decay.
+
+Formula:
+    risk = w² × time_decay × exp(-d² / 0.02)
+
+Where:
+    w           = risk weight (1=low, 2=medium, 3=high)
+    time_decay  = exp(-years_old / 3)  — recent crimes count more, but old ones still matter
+    d           = minimum distance from incident to route (km)
+
+Time decay examples:
+    0 years ago  → 100% weight
+    1 year ago   →  72% weight
+    2 years ago  →  51% weight
+    3 years ago  →  37% weight
+    5 years ago  →  19% weight
+
+Distance decay examples:
+    118m (0.118 km) → ~50% weight
+    300m+           → ~0% weight
 """
 import numpy as np
 from datetime import datetime
@@ -12,18 +30,20 @@ import math
 
 
 class RiskScorer:
-    """Calculate risk scores for walking paths"""
+    """Calculate risk scores for walking paths."""
 
     # Risk weights by incident type (Toronto TPS categories)
     CRIME_RISK_WEIGHTS = {
-        # High risk (w=3)
+        # High risk (w=3) — direct physical danger
         "SHOOTING": 3,
         "FIREARM": 3,
         "HOMICIDE": 3,
         "ROBBERY": 3,
         "ASSAULT": 3,
-        # Medium risk (w=2)
+        # Medium risk (w=2) — property crime with potential confrontation
         "BREAK AND ENTER": 2,
+        # Low risk (w=1) — all other MCI offences (e.g. Theft Over, Auto Theft)
+        # handled by the default return value in assign_risk()
     }
 
     def __init__(self):
@@ -40,16 +60,53 @@ class RiskScorer:
             if math.isnan(lat) or math.isnan(lng) or math.isinf(lat) or math.isinf(lng):
                 return False
             return True
-        except:
+        except Exception:
             return False
 
     def assign_risk(self, incident: Dict[str, Any]) -> int:
-        """Return risk weight (1-3) for an incident based on its type."""
+        """Return risk weight (1–3) for an incident based on its type."""
         description = incident.get("offence", "").upper()
         for crime_type, weight in self.CRIME_RISK_WEIGHTS.items():
             if crime_type in description:
                 return weight
-        return 1  # default low risk for any unmatched incident
+        return 1  # default: low risk for any unmatched offence
+
+    def get_time_decay(self, incident: Dict[str, Any]) -> float:
+        """
+        Calculate a gentle time decay factor based on how old the incident is.
+
+        Formula: time_decay = exp(-years_old / 3)
+
+        TPS dates come as ISO strings (e.g. "2022-03-15") or Unix epoch ms.
+        If the date is missing or unparseable, we default to 1.0 (no decay).
+        """
+        occ_date = incident.get("occ_date", "")
+
+        if not occ_date:
+            return 1.0
+
+        try:
+            # Handle Unix epoch milliseconds (int stored as string or number)
+            if isinstance(occ_date, (int, float)):
+                incident_date = datetime.utcfromtimestamp(occ_date / 1000)
+            else:
+                occ_date = str(occ_date).strip()
+                # Try common date formats
+                for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y"):
+                    try:
+                        incident_date = datetime.strptime(occ_date[:10], fmt)
+                        break
+                    except ValueError:
+                        continue
+                else:
+                    return 1.0  # couldn't parse — no decay
+
+            years_old = (self.current_time - incident_date).days / 365.25
+            years_old = max(0.0, years_old)  # no negative values
+            return float(np.exp(-years_old / 3))
+
+        except Exception:
+            return 1.0  # safe default
 
     def min_distance_to_path(self, incident_coords: Tuple[float, float], path: List[Tuple[float, float]]) -> float:
         """Return minimum distance (km) from incident to any point on the path."""
@@ -65,7 +122,7 @@ class RiskScorer:
                     continue
                 dist = geodesic(incident_coords, path_point).kilometers
                 min_dist = min(min_dist, dist)
-            except:
+            except Exception:
                 continue
         return min_dist
 
@@ -73,14 +130,13 @@ class RiskScorer:
         """
         Calculate total risk score for a path.
 
-        Formula (no time decay - static weights):
-            risk = w^2 * e^(-d^2 / 0.02)
+        Formula:
+            risk = w² × time_decay × exp(-d² / 0.02)
 
         Where:
-            w = risk weight (1=low, 2=medium, 3=high)
-            d = minimum distance from incident to route (km)
-
-        Distance decay: 50% risk at 118m, ~0% at 300m+
+            w           = risk weight (1=low, 2=medium, 3=high)
+            time_decay  = exp(-years_old / 3)
+            d           = min distance from incident to route (km)
         """
         total_risk = 0.0
         for incident in incidents:
@@ -97,9 +153,10 @@ class RiskScorer:
                 continue
 
             w = self.assign_risk(incident)
+            time_decay = self.get_time_decay(incident)
             d = self.min_distance_to_path((lat, lng), path)
             distance_factor = np.exp(-(d ** 2) / 0.02)
-            total_risk += (w ** 2) * distance_factor
+            total_risk += (w ** 2) * time_decay * distance_factor
 
         return total_risk
 
@@ -125,7 +182,7 @@ class RiskScorer:
                               radius_km: float = 0.118) -> List[Dict[str, Any]]:
         """
         Return incidents within radius_km of the path.
-        Default radius = 118m (50% distance decay point).
+        Default radius = 118m (the 50% distance decay point).
         """
         nearby = []
         for incident in incidents:
@@ -144,6 +201,7 @@ class RiskScorer:
             incident_coords = (lat, lng)
             min_dist = self.min_distance_to_path(incident_coords, path)
             weight = self.assign_risk(incident)
+            time_decay = self.get_time_decay(incident)
 
             if min_dist <= radius_km:
                 distance_factor = np.exp(-(min_dist ** 2) / 0.02)
@@ -152,7 +210,8 @@ class RiskScorer:
                     "coords": incident_coords,
                     "min_distance_km": min_dist,
                     "weight": weight,
-                    "risk_contribution": (weight ** 2) * distance_factor
+                    "time_decay": round(time_decay, 2),
+                    "risk_contribution": (weight ** 2) * time_decay * distance_factor
                 })
 
         return nearby
