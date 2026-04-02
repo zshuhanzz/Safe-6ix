@@ -110,10 +110,6 @@ export default function LocationInput({ value, onChange, placeholder, icon, clas
     setSavedLocations(updated)
   }
 
-  const handleFocus = () => {
-    setShowDropdown(true)
-  }
-
   return (
     <div className="relative">
       <div className="relative">
@@ -123,7 +119,7 @@ export default function LocationInput({ value, onChange, placeholder, icon, clas
           placeholder={placeholder}
           value={value}
           onChange={handleInputChange}
-          onFocus={handleFocus}
+          onFocus={() => setShowDropdown(true)}
           className={cn("pl-10 h-11 border-2", className)}
         />
       </div>

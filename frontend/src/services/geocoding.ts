@@ -8,8 +8,6 @@ export interface AddressSuggestion {
   lat: string
   lon: string
   place_id: number
-  osm_type: string
-  type: string
 }
 
 const GRAPHHOPPER_API_KEY = process.env.REACT_APP_GRAPHHOPPER_API_KEY || ""
@@ -79,8 +77,6 @@ export async function searchAddresses(query: string): Promise<AddressSuggestion[
           lat: hit.point.lat.toString(),
           lon: hit.point.lng.toString(),
           place_id: hit.osm_id || index,
-          osm_type: hit.osm_type || "node",
-          type: hit.osm_value || "place",
         }
       })
       .slice(0, 5)
