@@ -35,7 +35,6 @@ risk_scorer = RiskScorer()
 scheduler = BackgroundScheduler()
 
 # Caches
-reverse_geocode_cache: Dict[str, str] = {}
 geocode_cache: Dict[str, Optional[Dict[str, float]]] = {}
 last_geocode_request_time = 0.0
 geocode_semaphore = asyncio.Semaphore(2)
@@ -135,48 +134,6 @@ def validate_coordinates(lat: float, lng: float) -> bool:
     except:
         return False
 
-
-async def reverse_geocode(lat: float, lng: float) -> str:
-    """Convert coordinates to street name using GraphHopper. Returns coord string on failure."""
-    global last_geocode_request_time
-
-    if not validate_coordinates(lat, lng):
-        return f"{lat:.4f}, {lng:.4f}"
-
-    cache_key = f"{lat:.4f},{lng:.4f}"
-    if cache_key in reverse_geocode_cache:
-        return reverse_geocode_cache[cache_key]
-
-    try:
-        current_time = time.time()
-        wait = 1.0 - (current_time - last_geocode_request_time)
-        if wait > 0:
-            await asyncio.sleep(wait)
-        last_geocode_request_time = time.time()
-
-        response = requests.get(
-            f"{GEOCODING_URL}?point={lat},{lng}&key={GRAPHHOPPER_API_KEY}&reverse=true&locale=en",
-            timeout=10
-        )
-        response.raise_for_status()
-        data = response.json()
-
-        result = f"{lat:.4f}, {lng:.4f}"
-        if data.get("hits"):
-            hit = data["hits"][0]
-            street = hit.get("street", "")
-            house_number = hit.get("housenumber", "")
-            if street:
-                result = f"{house_number} {street}".strip() if house_number else street
-            elif hit.get("name"):
-                result = hit["name"]
-
-        reverse_geocode_cache[cache_key] = result
-        return result
-    except Exception as e:
-        result = f"{lat:.4f}, {lng:.4f}"
-        reverse_geocode_cache[cache_key] = result
-        return result
 
 
 async def geocode_address(address: str, retry_count: int = 0, max_retries: int = 5) -> Optional[Dict[str, float]]:
@@ -372,15 +329,6 @@ def periodic_data_fetch():
 
 # --- API Endpoints ---
 
-@app.get("/")
-async def root():
-    return {
-        "status": "online",
-        "service": "Safe 6ix API - Toronto",
-        "version": "2.0.0",
-        "last_data_fetch": data_fetcher.last_fetch_time.isoformat() if data_fetcher.last_fetch_time else None
-    }
-
 
 @app.get("/api/health")
 async def health_check():
@@ -434,7 +382,102 @@ async def get_all_incidents():
 async def calculate_routes(request: RouteRequest):
     """Calculate safe walking routes using multi-objective graph theory selection."""
     try:
-        return await asyncio.wait_for(_calculate_routes_internal(request), timeout=60.0)
+        # Validate inputs
+        if not request.origin or not request.origin.strip():
+            raise HTTPException(status_code=400, detail="Origin address cannot be empty.")
+        if not request.destination or not request.destination.strip():
+            raise HTTPException(status_code=400, detail="Destination address cannot be empty.")
+
+        # Step 1: Geocode both addresses in parallel
+        print(f"Geocoding: '{request.origin}' -> '{request.destination}'")
+        origin_coords, dest_coords = await asyncio.gather(
+            geocode_address(request.origin),
+            geocode_address(request.destination)
+        )
+
+        if not origin_coords or not dest_coords:
+            raise HTTPException(status_code=400, detail="Could not find those addresses in Toronto. Please check and try again.")
+
+        distance_m = geodesic(
+            (origin_coords["lat"], origin_coords["lng"]),
+            (dest_coords["lat"], dest_coords["lng"])
+        ).meters
+
+        if distance_m < 50:
+            raise HTTPException(status_code=400, detail="Origin and destination are too close together. Please enter locations at least 50m apart.")
+
+        # Step 2: Get candidate routes from GraphHopper
+        print("Fetching routes from GraphHopper...")
+        raw_routes = await get_graphhopper_routes(origin_coords, dest_coords, num_routes=5)
+
+        if not raw_routes:
+            raise HTTPException(status_code=500, detail="Could not generate routes. Please try again.")
+
+        # Step 3: Score each route
+        print(f"Scoring {len(raw_routes)} candidate routes...")
+        crime_data = data_fetcher.crime_data
+        scored = []
+
+        for route in raw_routes:
+            path_coords = [{"lat": lat, "lng": lng} for lat, lng in route["coordinates"]]
+            analysis = risk_scorer.analyze_route(path_coords, crime_data)
+            scored.append({
+                "distance_km": route["distance"] / 1000,
+                "distance_m": route["distance"],
+                "time_ms": route["time"],
+                "total_risk": analysis["total_risk"],
+                "coordinates": route["coordinates"],
+            })
+
+        # Step 4: Pareto-optimal selection (multi-objective shortest path)
+        print("Applying multi-objective route selection...")
+        selected = select_optimal_routes(scored)
+
+        if not selected:
+            raise HTTPException(status_code=500, detail="No valid routes found.")
+
+        # Step 5: Build response
+        route_configs = [
+            {"name": "Optimal Route",  "color": "#10b981", "desc_prefix": "Best balance of safety and distance"},
+            {"name": "Safest Route",   "color": "#3b82f6", "desc_prefix": "Safest path, avoids highest-risk areas"},
+            {"name": "Shortest Route", "color": "#f59e0b", "desc_prefix": "Shortest path, slightly less safe"},
+        ]
+
+        result_routes = []
+        for i, (route, config) in enumerate(zip(selected, route_configs)):
+            total_risk = route["total_risk"]
+            safety_score = int(100 * math.exp(-total_risk / 10)) if total_risk > 0 else 100
+            safety_score = max(0, min(100, safety_score))
+
+            nearby = risk_scorer.find_nearby_incidents(
+                [(lat, lng) for lat, lng in route["coordinates"]],
+                crime_data
+            )
+            if nearby:
+                description = f"{config['desc_prefix']}. {len(nearby)} incident(s) within 120m. Risk score: {total_risk:.1f}"
+            else:
+                description = f"{config['desc_prefix']}. No incidents within 120m. Risk score: {total_risk:.1f}"
+
+            result_routes.append({
+                "id": i + 1,
+                "name": config["name"],
+                "description": description,
+                "distance": f"{round(route['distance_km'] * 0.621371, 1)} mi",
+                "time": f"{round(route['time_ms'] / 1000 / 60)} min",
+                "safetyScore": safety_score,
+                "total_risk": total_risk,
+                "coordinates": [{"lat": lat, "lng": lng} for lat, lng in route["coordinates"]],
+                "color": config["color"],
+            })
+
+        print(f"Returning {len(result_routes)} routes")
+        return {
+            "routes": result_routes,
+            "originCoords": origin_coords,
+            "destCoords": dest_coords,
+            "data_timestamp": data_fetcher.last_fetch_time.isoformat() if data_fetcher.last_fetch_time else datetime.now().isoformat()
+        }
+
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Route calculation timed out. Please try different addresses.")
     except HTTPException:
@@ -443,108 +486,3 @@ async def calculate_routes(request: RouteRequest):
         import traceback
         print(f"Route calculation error: {e}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
-
-
-async def _calculate_routes_internal(request: RouteRequest):
-    # Validate inputs
-    if not request.origin or not request.origin.strip():
-        raise HTTPException(status_code=400, detail="Origin address cannot be empty.")
-    if not request.destination or not request.destination.strip():
-        raise HTTPException(status_code=400, detail="Destination address cannot be empty.")
-
-    # Step 1: Geocode
-    print(f"Geocoding: '{request.origin}' -> '{request.destination}'")
-    origin_coords, dest_coords = await asyncio.gather(
-        geocode_address(request.origin),
-        geocode_address(request.destination)
-    )
-
-    if not origin_coords or not dest_coords:
-        raise HTTPException(status_code=400, detail="Could not find those addresses in Toronto. Please check and try again.")
-
-    distance_m = geodesic(
-        (origin_coords["lat"], origin_coords["lng"]),
-        (dest_coords["lat"], dest_coords["lng"])
-    ).meters
-
-    if distance_m < 50:
-        raise HTTPException(status_code=400, detail="Origin and destination are too close together. Please enter locations at least 50m apart.")
-
-    # Step 2: Get candidate routes from GraphHopper
-    print("Fetching routes from GraphHopper...")
-    raw_routes = await get_graphhopper_routes(origin_coords, dest_coords, num_routes=5)
-
-    if not raw_routes:
-        raise HTTPException(status_code=500, detail="Could not generate routes. Please try again.")
-
-    # Step 3: Score each route
-    print(f"Scoring {len(raw_routes)} candidate routes...")
-    crime_data = data_fetcher.crime_data
-    scored = []
-
-    for route in raw_routes:
-        path_coords = [{"lat": lat, "lng": lng} for lat, lng in route["coordinates"]]
-        analysis = risk_scorer.analyze_route(path_coords, crime_data)
-        distance_km = route["distance"] / 1000
-
-        scored.append({
-            "distance_km": distance_km,
-            "distance_m": route["distance"],
-            "time_ms": route["time"],
-            "total_risk": analysis["total_risk"],
-            "coordinates": route["coordinates"],
-        })
-
-    # Step 4: Pareto-optimal selection (bi-criteria shortest path)
-    print("Applying multi-objective route selection...")
-    selected = select_optimal_routes(scored)
-
-    if not selected:
-        raise HTTPException(status_code=500, detail="No valid routes found.")
-
-    # Step 5: Build response
-    route_configs = [
-        {"name": "Optimal Route",  "color": "#10b981", "desc_prefix": "Best balance of safety and distance"},
-        {"name": "Safest Route",   "color": "#3b82f6", "desc_prefix": "Safest path, avoids highest-risk areas"},
-        {"name": "Shortest Route", "color": "#f59e0b", "desc_prefix": "Shortest path, slightly less safe"},
-    ]
-
-    result_routes = []
-    for i, (route, config) in enumerate(zip(selected, route_configs)):
-        distance_mi = round(route["distance_km"] * 0.621371, 1)
-        time_min = round(route["time_ms"] / 1000 / 60)
-        total_risk = route["total_risk"]
-
-        safety_score = int(100 * math.exp(-total_risk / 10)) if total_risk > 0 else 100
-        safety_score = max(0, min(100, safety_score))
-
-        nearby = risk_scorer.find_nearby_incidents(
-            [(lat, lng) for lat, lng in route["coordinates"]],
-            crime_data
-        )
-
-        if nearby:
-            threat_count = len(nearby)
-            description = f"{config['desc_prefix']}. {threat_count} incident(s) within 120m. Risk score: {total_risk:.1f}"
-        else:
-            description = f"{config['desc_prefix']}. No incidents within 120m. Risk score: {total_risk:.1f}"
-
-        result_routes.append({
-            "id": i + 1,
-            "name": config["name"],
-            "description": description,
-            "distance": f"{distance_mi} mi",
-            "time": f"{time_min} min",
-            "safetyScore": safety_score,
-            "total_risk": total_risk,
-            "coordinates": [{"lat": lat, "lng": lng} for lat, lng in route["coordinates"]],
-            "color": config["color"],
-        })
-
-    print(f"Returning {len(result_routes)} routes")
-    return {
-        "routes": result_routes,
-        "originCoords": {"lat": origin_coords["lat"], "lng": origin_coords["lng"]},
-        "destCoords": {"lat": dest_coords["lat"], "lng": dest_coords["lng"]},
-        "data_timestamp": data_fetcher.last_fetch_time.isoformat() if data_fetcher.last_fetch_time else datetime.now().isoformat()
-    }
